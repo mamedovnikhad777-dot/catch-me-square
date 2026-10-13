@@ -2,7 +2,7 @@ import sys
 import os
 import random
 
-from PySide6.QtCore import Qt, QTimer, QFile, QIODevice, Signal
+from PySide6.QtCore import Qt, QTimer, QFile, QIODevice, QObject, QEvent, Signal
 from PySide6.QtWidgets import (
     QApplication, QFrame, QGraphicsDropShadowEffect
 )
@@ -11,35 +11,36 @@ from PySide6.QtUiTools import QUiLoader
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UI_DIR = os.path.join(BASE_DIR, "design")
+UI_DIR = BASE_DIR
 RECORD_FILE = os.path.join(BASE_DIR, "record.txt")
 
-DEFAULT_STYLE = "GridCell { background-color: #f5f8fa; border: 1px solid #e3e8ec; border-radius: 6px; }"
-ACTIVE_STYLE = "GridCell { background-color: #1976d2; border: none; border-radius: 6px; }"
+DEFAULT_STYLE = "QFrame { background-color: #f5f8fa; border: 1px solid #e3e8ec; border-radius: 6px; }"
+ACTIVE_STYLE = "QFrame { background-color: #1976d2; border: 1px solid #1976d2; border-radius: 6px; }"
 
 
-class GridCell(QFrame):
+class CellFilter(QObject):
     clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active = False
-        self.setStyleSheet(DEFAULT_STYLE)
 
-    def set_inactive(self):
-        self._active = False
-        self.setCursor(Qt.ArrowCursor)
-        self.setStyleSheet(DEFAULT_STYLE)
+    def set_active(self, value):
+        self._active = value
+        widget = self.parent()
+        if value:
+            widget.setCursor(Qt.PointingHandCursor)
+            widget.setStyleSheet(ACTIVE_STYLE)
+        else:
+            widget.setCursor(Qt.ArrowCursor)
+            widget.setStyleSheet(DEFAULT_STYLE)
 
-    def set_active(self):
-        self._active = True
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(ACTIVE_STYLE)
-
-    def mousePressEvent(self, event):
-        if self._active and event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and self._active:
+            if event.button() == Qt.LeftButton:
+                self.clicked.emit()
+                return True
+        return super().eventFilter(obj, event)
 
 
 class GameController:
@@ -49,7 +50,6 @@ class GameController:
 
     def __init__(self):
         loader = QUiLoader()
-        loader.registerCustomWidget(GridCell)
         self.main_window = self._load_ui(loader, "main_window.ui")
         self.game_window = self._load_ui(loader, "game_window.ui")
         self.end_window = self._load_ui(loader, "end_window.ui")
@@ -61,11 +61,21 @@ class GameController:
         self.record = self._load_record()
 
         self.cells = []
+        self.filters = []
         for r in range(self.GRID):
             for c in range(self.GRID):
-                cell = self.game_window.findChild(GridCell, f"cell_{r}_{c}")
-                cell.clicked.connect(self.on_cell_clicked)
+                name = f"cell_{r}_{c}"
+                cell = self.game_window.findChild(QFrame, name)
+                if cell is None:
+                    raise RuntimeError(f"Не найден {name} в game_window.ui")
+
+                flt = CellFilter(cell)
+                flt.clicked.connect(self.on_cell_clicked)
+                cell.installEventFilter(flt)
+                flt.set_active(False)
+
                 self.cells.append(cell)
+                self.filters.append(flt)
 
         self.active_index = -1
         self.score = 0
@@ -83,7 +93,6 @@ class GameController:
         self.end_window.btnPlayAgain.clicked.connect(self.start_game)
         self.end_window.btnRestart.clicked.connect(self.start_game)
 
-        self.reset_cells()
         self.show_main()
 
     def _load_ui(self, loader, name):
@@ -120,10 +129,8 @@ class GameController:
         except Exception:
             pass
 
-    def reset_cells(self):
-        for c in self.cells:
-            c.set_inactive()
-        self.active_index = -1
+    def set_cell_active(self, idx, value):
+        self.filters[idx].set_active(value)
 
     def show_main(self):
         self.game_timer.stop()
@@ -144,19 +151,22 @@ class GameController:
         self.game_window.labelRecordValue.setText(str(self.record))
         self.game_window.progressBar.setValue(100)
 
-        self.reset_cells()
+        for i in range(len(self.cells)):
+            self.set_cell_active(i, False)
+        self.active_index = -1
+
         self.game_window.show()
         self.game_timer.start()
         self.spawn_square()
 
     def spawn_square(self):
         if self.active_index >= 0:
-            self.cells[self.active_index].set_inactive()
+            self.set_cell_active(self.active_index, False)
         new_idx = random.randint(0, len(self.cells) - 1)
         if new_idx == self.active_index and len(self.cells) > 1:
             new_idx = (new_idx + 1) % len(self.cells)
         self.active_index = new_idx
-        self.cells[new_idx].set_active()
+        self.set_cell_active(new_idx, True)
         self.move_timer.start(self.SQUARE_LIFE)
 
     def move_square(self):
@@ -184,7 +194,7 @@ class GameController:
         self.game_timer.stop()
         self.move_timer.stop()
         if self.active_index >= 0:
-            self.cells[self.active_index].set_inactive()
+            self.set_cell_active(self.active_index, False)
         self.active_index = -1
 
         new_record = False
